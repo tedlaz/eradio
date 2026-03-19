@@ -12,12 +12,10 @@ urlencoding = "2.0"
 
 # Audio
 rodio = { version = "0.17", default-features = false, features = ["symphonia-mp3"] }
-cpal = "0.15"
 
 # GUI (locked to compatible versions)
 eframe = { version = "=0.28.1", default-features = false, features = ["default_fonts", "glow"] }
 egui = "=0.28.1"
-glow = "0.13"
 
 # Utilities
 anyhow = "1.0"
@@ -30,6 +28,13 @@ png = "0.17"
 winresource = "0.1"
 ico = "0.3"
 png = "0.17"
+
+[profile.release]
+opt-level = "z"       # optimize for size over speed
+lto = true            # link-time optimization across all crates
+codegen-units = 1     # single codegen unit for better optimization
+panic = "abort"       # smaller than unwinding
+strip = true          # strip debug symbols and metadata
 
 [[bin]]
 name = "eradio"

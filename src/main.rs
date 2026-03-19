@@ -113,48 +113,24 @@ struct RadioApp {
     last_notified_metadata: Option<String>,
 }
 
-// HTTP reader wrapper
-struct HttpReader {
+// HTTP stream source for rodio (Read + fake Seek)
+struct StreamSource {
     response: reqwest::blocking::Response,
 }
 
-impl HttpReader {
+impl StreamSource {
     fn new(url: &str) -> Option<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .ok()?;
-
-        client
-            .get(url)
-            .send()
-            .ok()
-            .map(|response| HttpReader { response })
-    }
-}
-
-impl Read for HttpReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.response
-            .read(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-    }
-}
-
-// Stream source for rodio
-struct StreamSource {
-    reader: HttpReader,
-}
-
-impl StreamSource {
-    fn new(url: &str) -> Option<Self> {
-        HttpReader::new(url).map(|reader| StreamSource { reader })
+        client.get(url).send().ok().map(|response| StreamSource { response })
     }
 }
 
 impl Read for StreamSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf)
+        self.response.read(buf)
     }
 }
 
@@ -248,7 +224,7 @@ impl RadioApp {
                             .filter(|s| {
                                 s.codec
                                     .as_ref()
-                                    .map(|c: &String| c.to_uppercase() == "MP3")
+                                    .map(|c| c.eq_ignore_ascii_case("MP3"))
                                     .unwrap_or(false)
                             })
                             .collect();
@@ -269,17 +245,18 @@ impl RadioApp {
         self.stop();
 
         let url = station.get_stream_url();
-        let url_for_meta = url.clone();
-        let uuid = station.station_uuid.clone();
 
         // Record click (background — don't block UI)
-        let click_url = format!("https://de1.api.radio-browser.info/json/url/{}", uuid);
+        let click_url = format!(
+            "https://de1.api.radio-browser.info/json/url/{}",
+            station.station_uuid
+        );
         std::thread::spawn(move || {
-            let click_client = reqwest::blocking::Client::builder()
+            let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap();
-            let _ = click_client
+            let _ = client
                 .get(&click_url)
                 .header("User-Agent", "RadioPlayer/1.0")
                 .send();
@@ -288,23 +265,20 @@ impl RadioApp {
         self.current_station = Some(station);
         self.is_playing = true;
         self.last_notified_metadata = None;
-
-        // Save state so we remember last station
         self.save_state();
 
         self.metadata_running.store(true, Ordering::SeqCst);
         let gen = self.metadata_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         if let Some(ref handle) = self.stream_handle {
-            let new_sink = rodio::Sink::try_new(handle).ok();
-            if let Some(sink) = new_sink {
+            if let Some(sink) = rodio::Sink::try_new(handle).ok() {
                 let sink = Arc::new(sink);
                 self.current_sink = Some(Arc::clone(&sink));
                 let running = Arc::clone(&self.metadata_running);
 
-                let url_for_thread = url.clone();
+                let audio_url = url.clone();
                 std::thread::spawn(move || {
-                    if let Some(stream) = StreamSource::new(&url_for_thread) {
+                    if let Some(stream) = StreamSource::new(&audio_url) {
                         if let Ok(source) = rodio::Decoder::new(stream) {
                             sink.append(source);
                             sink.play();
@@ -321,81 +295,74 @@ impl RadioApp {
         // Metadata thread
         let meta_running = Arc::clone(&self.metadata_running);
         let meta_gen = Arc::clone(&self.metadata_generation);
-        let my_gen = gen;
         let metadata = Arc::clone(&self.current_metadata);
-        let _ = std::thread::spawn(move || {
-            let meta_client = reqwest::blocking::Client::builder()
+        std::thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap();
-            if let Ok(response) = meta_client
-                .get(&url_for_meta)
+            let Ok(response) = client
+                .get(&url)
                 .header("Icy-MetaData", "1")
                 .header("User-Agent", "RadioPlayer/1.0")
                 .send()
+            else {
+                return;
+            };
+
+            let Some(meta_interval) = response
+                .headers()
+                .get("icy-metaint")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+            else {
+                return;
+            };
+
+            let mut stream = response;
+            let mut buffer = Vec::new();
+            let re = regex::Regex::new(r"StreamTitle='([^']*)'").unwrap();
+
+            while meta_running.load(Ordering::SeqCst)
+                && meta_gen.load(Ordering::SeqCst) == gen
             {
-                let meta_interval: Option<usize> = response
-                    .headers()
-                    .get("icy-metaint")
-                    .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
-                    .and_then(|v: &str| v.parse().ok());
+                let mut chunk = vec![0u8; 8192];
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
 
-                let meta_interval = match meta_interval {
-                    Some(n) => n,
-                    None => return,
-                };
+                        while buffer.len() >= meta_interval + 1 {
+                            buffer.drain(0..meta_interval);
 
-                let mut stream = response;
-                let mut buffer = Vec::new();
-                let re = regex::Regex::new(r"StreamTitle='([^']*)'").unwrap();
+                            let meta_len = buffer[0] as usize * 16;
+                            let total_meta = 1 + meta_len;
 
-                while meta_running.load(Ordering::SeqCst)
-                    && meta_gen.load(Ordering::SeqCst) == my_gen
-                {
-                    let mut chunk = vec![0u8; 8192];
-                    match stream.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            buffer.extend_from_slice(&chunk[..n]);
+                            if buffer.len() < total_meta {
+                                break;
+                            }
 
-                            while buffer.len() >= meta_interval + 1 {
-                                // Drain audio data up to the metadata block
-                                buffer.drain(0..meta_interval);
-
-                                // Read metadata length byte
-                                let meta_len = buffer[0] as usize * 16;
-                                let total_meta = 1 + meta_len; // length byte + payload
-
-                                if buffer.len() < total_meta {
-                                    break;
-                                }
-
-                                if meta_len > 0 {
-                                    let meta_bytes: Vec<u8> =
-                                        buffer[1..1 + meta_len].to_vec();
-                                    if let Ok(text) = String::from_utf8(meta_bytes) {
-                                        if let Some(caps) = re.captures(&text) {
-                                            if let Some(m) = caps.get(1) {
-                                                let title = m.as_str().to_string();
-                                                if meta_gen.load(Ordering::SeqCst) == my_gen {
-                                                    let mut guard =
-                                                        metadata.lock().unwrap();
-                                                    *guard = Some(title);
-                                                    drop(guard);
-                                                }
+                            if meta_len > 0 {
+                                if let Ok(text) =
+                                    String::from_utf8(buffer[1..1 + meta_len].to_vec())
+                                {
+                                    if let Some(caps) = re.captures(&text) {
+                                        if let Some(m) = caps.get(1) {
+                                            if meta_gen.load(Ordering::SeqCst) == gen {
+                                                *metadata.lock().unwrap() =
+                                                    Some(m.as_str().to_string());
                                             }
                                         }
                                     }
                                 }
-
-                                // Drain the length byte + metadata payload
-                                buffer.drain(0..total_meta);
                             }
+
+                            buffer.drain(0..total_meta);
                         }
-                        Err(_) => break,
                     }
-                    std::thread::sleep(Duration::from_millis(50));
+                    Err(_) => break,
                 }
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
     }
@@ -491,15 +458,11 @@ impl eframe::App for RadioApp {
             .frame(panel_frame)
             .show(ctx, |ui| {
                 // ── Player card (always visible) ────────────────────────
-                {
-                    let has_station = current_name.is_some();
-                    let card_fill = BG_PLAYING_CARD;
-                    let card_stroke = egui::Stroke::new(1.0, BORDER_PLAYING);
-
-                    egui::Frame::none()
-                        .fill(card_fill)
+                let has_station = current_name.is_some();
+                egui::Frame::none()
+                        .fill(BG_PLAYING_CARD)
                         .rounding(12.0)
-                        .stroke(card_stroke)
+                        .stroke(egui::Stroke::new(1.0, BORDER_PLAYING))
                         .inner_margin(egui::Margin::same(16.0))
                         .show(ui, |ui: &mut egui::Ui| {
                             if !has_station {
@@ -546,15 +509,11 @@ impl eframe::App for RadioApp {
                                     if !track.is_empty() {
                                         ui.add_space(6.0);
 
-                                        let display_text = track.clone();
                                         let avail_w = ui.available_width();
-                                        let font_size = 17.0_f32;
+                                        let font_id = egui::FontId::proportional(17.0);
 
-                                        let font_id = egui::FontId::proportional(font_size);
-
-                                        // Measure full text width
                                         let full_galley = ui.painter().layout_no_wrap(
-                                            display_text.clone(), font_id.clone(), Color32::WHITE,
+                                            track.clone(), font_id.clone(), Color32::WHITE,
                                         );
                                         let text_w = full_galley.size().x;
                                         let line_h = full_galley.size().y + 4.0;
@@ -579,7 +538,7 @@ impl eframe::App for RadioApp {
                                         };
 
                                         // Draw the text, then draw it again immediately after for seamless looping
-                                        let chars: Vec<char> = display_text.chars().collect();
+                                        let chars: Vec<char> = track.chars().collect();
                                         let repeat_count = if text_w > avail_w { 2 } else { 1 };
                                         for rep in 0..repeat_count {
                                         let rep_offset = rep as f32 * (text_w + gap);
@@ -673,7 +632,6 @@ impl eframe::App for RadioApp {
                                 });
                             }
                         });
-                }
 
                 ui.add_space(10.0);
 
