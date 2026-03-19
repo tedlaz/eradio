@@ -46,8 +46,6 @@ cross build --release --target x86_64-pc-windows-gnu
 | GUI | egui / eframe |
 | Audio | rodio / cpal |
 | HTTP | reqwest |
-| Tray (Linux) | ksni |
-| Tray (Windows/macOS) | tray-icon / muda |
 | Notifications | notify-rust |
 
 ## Author
