@@ -1,0 +1,36 @@
+[package]
+name = "eradio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Networking
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+urlencoding = "2.0"
+
+# Audio
+rodio = { version = "0.17", default-features = false, features = ["symphonia-mp3"] }
+cpal = "0.15"
+
+# GUI (locked to compatible versions)
+eframe = { version = "=0.28.1", default-features = false, features = ["default_fonts", "glow"] }
+egui = "=0.28.1"
+glow = "0.13"
+
+# Utilities
+anyhow = "1.0"
+regex = "1.0"
+dirs = "5"
+notify-rust = "4"
+png = "0.17"
+
+[build-dependencies]
+winresource = "0.1"
+ico = "0.3"
+png = "0.17"
+
+[[bin]]
+name = "eradio"
+path = "src/main.rs"
