@@ -24,11 +24,3 @@ impl RadioStation {
             .unwrap_or_else(|| self.url.clone())
     }
 }
-
-pub struct RadioBrowserAPI;
-
-impl RadioBrowserAPI {
-    pub fn new() -> Self {
-        RadioBrowserAPI
-    }
-}

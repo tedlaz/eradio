@@ -8,7 +8,7 @@ use egui::{Color32, RichText};
 use radio_browser::RadioStation;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -89,14 +89,21 @@ struct RadioApp {
     // Audio
     _stream: Option<rodio::OutputStream>,
     stream_handle: Option<rodio::OutputStreamHandle>,
+    current_sink: Option<Arc<rodio::Sink>>,
 
     // Metadata
     metadata_running: Arc<AtomicBool>,
+    metadata_generation: Arc<AtomicU64>,
     current_metadata: Arc<Mutex<Option<String>>>,
 
     // Message channel for UI actions
     action_tx: mpsc::Sender<AppAction>,
     action_rx: mpsc::Receiver<AppAction>,
+
+    // Search results from background thread
+    search_results_rx: mpsc::Receiver<Vec<RadioStation>>,
+    search_results_tx: mpsc::Sender<Vec<RadioStation>>,
+    is_searching: bool,
 
     // Window state
     show_about: bool,
@@ -160,6 +167,7 @@ impl std::io::Seek for StreamSource {
 impl RadioApp {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
+        let (search_tx, search_rx) = mpsc::channel();
         let (stream, stream_handle) = rodio::OutputStream::try_default().ok().unzip();
         RadioApp {
             search_query: String::new(),
@@ -168,10 +176,15 @@ impl RadioApp {
             is_playing: false,
             _stream: stream,
             stream_handle,
+            current_sink: None,
             metadata_running: Arc::new(AtomicBool::new(false)),
+            metadata_generation: Arc::new(AtomicU64::new(0)),
             current_metadata: Arc::new(Mutex::new(None)),
             action_tx: tx,
             action_rx: rx,
+            search_results_rx: search_rx,
+            search_results_tx: search_tx,
+            is_searching: false,
             show_about: false,
             startup_done: false,
             last_notified_metadata: None,
@@ -210,36 +223,46 @@ impl RadioApp {
             return;
         }
 
+        self.is_searching = true;
         let url = format!(
             "https://de1.api.radio-browser.info/json/stations/byname/{}?limit=100&order=votes&reverse=true",
             urlencoding::encode(query)
         );
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
+        let tx = self.search_results_tx.clone();
+        std::thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap();
 
-        match client
-            .get(&url)
-            .header("User-Agent", "RadioPlayer/1.0")
-            .send()
-        {
-            Ok(response) => {
-                if let Ok(stations) = response.json::<Vec<RadioStation>>() {
-                    self.stations = stations
-                        .into_iter()
-                        .filter(|s| {
-                            s.codec
-                                .as_ref()
-                                .map(|c: &String| c.to_uppercase() == "MP3")
-                                .unwrap_or(false)
-                        })
-                        .collect();
+            match client
+                .get(&url)
+                .header("User-Agent", "RadioPlayer/1.0")
+                .send()
+            {
+                Ok(response) => {
+                    if let Ok(stations) = response.json::<Vec<RadioStation>>() {
+                        let filtered: Vec<RadioStation> = stations
+                            .into_iter()
+                            .filter(|s| {
+                                s.codec
+                                    .as_ref()
+                                    .map(|c: &String| c.to_uppercase() == "MP3")
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        let _ = tx.send(filtered);
+                    } else {
+                        let _ = tx.send(Vec::new());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Search error: {}", e);
+                    let _ = tx.send(Vec::new());
                 }
             }
-            Err(e) => eprintln!("Search error: {}", e),
-        }
+        });
     }
 
     fn play_station(&mut self, station: RadioStation) {
@@ -249,16 +272,18 @@ impl RadioApp {
         let url_for_meta = url.clone();
         let uuid = station.station_uuid.clone();
 
-        // Record click
+        // Record click (background — don't block UI)
         let click_url = format!("https://de1.api.radio-browser.info/json/url/{}", uuid);
-        let click_client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-        let _ = click_client
-            .get(&click_url)
-            .header("User-Agent", "RadioPlayer/1.0")
-            .send();
+        std::thread::spawn(move || {
+            let click_client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let _ = click_client
+                .get(&click_url)
+                .header("User-Agent", "RadioPlayer/1.0")
+                .send();
+        });
 
         self.current_station = Some(station);
         self.is_playing = true;
@@ -267,11 +292,15 @@ impl RadioApp {
         // Save state so we remember last station
         self.save_state();
 
+        self.metadata_running.store(true, Ordering::SeqCst);
+        let gen = self.metadata_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
         if let Some(ref handle) = self.stream_handle {
             let new_sink = rodio::Sink::try_new(handle).ok();
             if let Some(sink) = new_sink {
+                let sink = Arc::new(sink);
+                self.current_sink = Some(Arc::clone(&sink));
                 let running = Arc::clone(&self.metadata_running);
-                running.store(true, Ordering::SeqCst);
 
                 let url_for_thread = url.clone();
                 std::thread::spawn(move || {
@@ -282,6 +311,7 @@ impl RadioApp {
                             while !sink.empty() && running.load(Ordering::SeqCst) {
                                 std::thread::sleep(Duration::from_millis(100));
                             }
+                            sink.stop();
                         }
                     }
                 });
@@ -290,6 +320,8 @@ impl RadioApp {
 
         // Metadata thread
         let meta_running = Arc::clone(&self.metadata_running);
+        let meta_gen = Arc::clone(&self.metadata_generation);
+        let my_gen = gen;
         let metadata = Arc::clone(&self.current_metadata);
         let _ = std::thread::spawn(move || {
             let meta_client = reqwest::blocking::Client::builder()
@@ -317,7 +349,9 @@ impl RadioApp {
                 let mut buffer = Vec::new();
                 let re = regex::Regex::new(r"StreamTitle='([^']*)'").unwrap();
 
-                while meta_running.load(Ordering::SeqCst) {
+                while meta_running.load(Ordering::SeqCst)
+                    && meta_gen.load(Ordering::SeqCst) == my_gen
+                {
                     let mut chunk = vec![0u8; 8192];
                     match stream.read(&mut chunk) {
                         Ok(0) => break,
@@ -343,10 +377,12 @@ impl RadioApp {
                                         if let Some(caps) = re.captures(&text) {
                                             if let Some(m) = caps.get(1) {
                                                 let title = m.as_str().to_string();
-                                                let mut guard =
-                                                    metadata.lock().unwrap();
-                                                *guard = Some(title);
-                                                drop(guard);
+                                                if meta_gen.load(Ordering::SeqCst) == my_gen {
+                                                    let mut guard =
+                                                        metadata.lock().unwrap();
+                                                    *guard = Some(title);
+                                                    drop(guard);
+                                                }
                                             }
                                         }
                                     }
@@ -366,6 +402,9 @@ impl RadioApp {
 
     fn stop(&mut self) {
         self.metadata_running.store(false, Ordering::SeqCst);
+        if let Some(sink) = self.current_sink.take() {
+            sink.stop();
+        }
         self.is_playing = false;
         // Keep current_station so the player card still shows the last station
         *self.current_metadata.lock().unwrap() = None;
@@ -379,6 +418,11 @@ impl RadioApp {
                 AppAction::Stop => self.stop(),
                 AppAction::Search(query) => self.search(&query),
             }
+        }
+        // Poll for search results from background thread
+        if let Ok(results) = self.search_results_rx.try_recv() {
+            self.stations = results;
+            self.is_searching = false;
         }
     }
 
@@ -458,7 +502,6 @@ impl eframe::App for RadioApp {
                         .stroke(card_stroke)
                         .inner_margin(egui::Margin::same(16.0))
                         .show(ui, |ui: &mut egui::Ui| {
-                            ui.set_max_height(60.0);
                             if !has_station {
                                 // Idle state
                                 ui.horizontal(|ui| {
@@ -488,15 +531,103 @@ impl eframe::App for RadioApp {
                                     );
                                 });
                             } else {
-                                // Row 1: Station name (bold) + Stop/Play button
-                                ui.horizontal(|ui| {
-                                    if let Some(ref name) = current_name {
-                                        ui.label(
-                                            RichText::new(name)
-                                                .size(16.0)
-                                                .strong()
-                                                .color(TEXT),
+                                // Row 1: Station name
+                                if let Some(ref name) = current_name {
+                                    ui.label(
+                                        RichText::new(name)
+                                            .size(16.0)
+                                            .strong()
+                                            .color(TEXT),
+                                    );
+                                }
+
+                                // Scrolling animated color metadata (yellow/orange flowing)
+                                if let Some(ref track) = metadata {
+                                    if !track.is_empty() {
+                                        ui.add_space(6.0);
+
+                                        let display_text = track.clone();
+                                        let avail_w = ui.available_width();
+                                        let font_size = 17.0_f32;
+
+                                        let font_id = egui::FontId::proportional(font_size);
+
+                                        // Measure full text width
+                                        let full_galley = ui.painter().layout_no_wrap(
+                                            display_text.clone(), font_id.clone(), Color32::WHITE,
                                         );
+                                        let text_w = full_galley.size().x;
+                                        let line_h = full_galley.size().y + 4.0;
+
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(avail_w, line_h),
+                                            egui::Sense::hover(),
+                                        );
+
+                                        let painter = ui.painter().with_clip_rect(rect);
+                                        let t = time as f32;
+
+                                        // If text is wider than available space, scroll it
+                                        let gap = 50.0; // small gap between repeated text
+                                        let scroll_offset = if text_w > avail_w {
+                                            let total = text_w + gap;
+                                            let scroll_speed = 80.0; // pixels per second
+                                            let phase = (t * scroll_speed) % total;
+                                            -phase
+                                        } else {
+                                            0.0
+                                        };
+
+                                        // Draw the text, then draw it again immediately after for seamless looping
+                                        let chars: Vec<char> = display_text.chars().collect();
+                                        let repeat_count = if text_w > avail_w { 2 } else { 1 };
+                                        for rep in 0..repeat_count {
+                                        let rep_offset = rep as f32 * (text_w + gap);
+                                        let mut x_pos = rect.left() + scroll_offset + rep_offset;
+
+                                        for (i, ch) in chars.iter().enumerate() {
+                                            // Wave between yellow and orange
+                                            let wave = ((t * 2.0 - i as f32 * 0.2).sin() * 0.5 + 0.5)
+                                                .clamp(0.0, 1.0);
+                                            // yellow (255,220,0) <-> orange (255,130,0)
+                                            let g = (220.0 * (1.0 - wave) + 130.0 * wave) as u8;
+                                            let color = Color32::from_rgb(255, g, 0);
+
+                                            let galley = painter.layout_no_wrap(
+                                                ch.to_string(), font_id.clone(), color,
+                                            );
+                                            let char_w = galley.size().x;
+
+                                            // Only paint if visible
+                                            if x_pos + char_w > rect.left() && x_pos < rect.right() {
+                                                painter.galley(
+                                                    egui::pos2(x_pos, rect.top() + 2.0),
+                                                    galley,
+                                                    Color32::TRANSPARENT,
+                                                );
+                                            }
+                                            x_pos += char_w;
+                                        }
+                                        }
+                                    }
+                                }
+
+                                // Bottom row: About button (left) + Stop/Play button (right)
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("About")
+                                                    .color(TEXT)
+                                                    .size(11.0),
+                                            )
+                                            .fill(BG_CARD)
+                                            .rounding(4.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.show_about = true;
                                     }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -540,92 +671,6 @@ impl eframe::App for RadioApp {
                                         },
                                     );
                                 });
-
-                                // Scrolling animated color metadata (yellow/orange flowing)
-                                if let Some(ref track) = metadata {
-                                    if !track.is_empty() {
-                                        ui.add_space(6.0);
-
-                                        let display_text = track.clone();
-                                        let avail_w = ui.available_width();
-                                        let font_size = 17.0_f32;
-
-                                        let font_id = egui::FontId::proportional(font_size);
-
-                                        // Measure full text width
-                                        let full_galley = ui.painter().layout_no_wrap(
-                                            display_text.clone(), font_id.clone(), Color32::WHITE,
-                                        );
-                                        let text_w = full_galley.size().x;
-                                        let line_h = full_galley.size().y + 4.0;
-
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(avail_w, line_h),
-                                            egui::Sense::hover(),
-                                        );
-
-                                        let painter = ui.painter().with_clip_rect(rect);
-                                        let t = time as f32;
-
-                                        // If text is wider than available space, scroll it
-                                        let scroll_offset = if text_w > avail_w {
-                                            let total = text_w + avail_w * 0.5;
-                                            let scroll_speed = 40.0; // pixels per second
-                                            let phase = (t * scroll_speed) % total;
-                                            -phase + avail_w * 0.25
-                                        } else {
-                                            0.0
-                                        };
-
-                                        let mut x_offset = rect.left() + scroll_offset;
-
-                                        for (i, ch) in display_text.chars().enumerate() {
-                                            // Wave between yellow and orange
-                                            let wave = ((t * 2.0 - i as f32 * 0.2).sin() * 0.5 + 0.5)
-                                                .clamp(0.0, 1.0);
-                                            // yellow (255,220,0) <-> orange (255,130,0)
-                                            let g = (220.0 * (1.0 - wave) + 130.0 * wave) as u8;
-                                            let color = Color32::from_rgb(255, g, 0);
-
-                                            let galley = painter.layout_no_wrap(
-                                                ch.to_string(), font_id.clone(), color,
-                                            );
-                                            let char_w = galley.size().x;
-
-                                            // Only paint if visible
-                                            if x_offset + char_w > rect.left() && x_offset < rect.right() {
-                                                painter.galley(
-                                                    egui::pos2(x_offset, rect.top() + 2.0),
-                                                    galley,
-                                                    Color32::TRANSPARENT,
-                                                );
-                                            }
-                                            x_offset += char_w;
-                                        }
-                                    }
-                                }
-
-                                // About button under the player controls
-                                ui.add_space(4.0);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("About")
-                                                        .color(TEXT)
-                                                        .size(11.0),
-                                                )
-                                                .fill(BG_CARD)
-                                                .rounding(4.0),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.show_about = true;
-                                        }
-                                    },
-                                );
                             }
                         });
                 }
@@ -750,6 +795,7 @@ impl eframe::App for RadioApp {
                                         bottom: 8.0,
                                     })
                                     .show(ui, |ui: &mut egui::Ui| {
+                                        ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             let btn_label = if is_current {
                                                 "⏸"
@@ -899,9 +945,13 @@ impl eframe::App for RadioApp {
             self.last_notified_metadata = None;
         }
 
-        // Repaint for animations (LIVE dot pulse, marquee scroll, color cycle)
-        if is_playing {
+        // Always request a repaint so the event loop never sleeps indefinitely.
+        // This prevents the window manager from thinking the app is unresponsive.
+        // When playing, repaint fast for animations; otherwise use a slow idle tick.
+        if is_playing || self.is_searching {
             ctx.request_repaint_after(Duration::from_millis(33));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
 }
