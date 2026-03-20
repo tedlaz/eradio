@@ -110,7 +110,7 @@ fn generate_ico_from_png(png_bytes: &[u8], ico_path: &str) {
             resize_rgba(&rgba, w, h, size, size)
         };
         let image = ico::IconImage::from_rgba_data(size, size, resized);
-        icon_dir.add_entry(ico::IconDirEntry::encode(&image).unwrap());
+        icon_dir.add_entry(ico::IconDirEntry::encode_as_png(&image).unwrap());
     }
 
     let mut buf = Vec::new();

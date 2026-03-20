@@ -10,7 +10,6 @@ Browse thousands of stations from the [Radio Browser](https://www.radio-browser.
 - Audio playback with live ICY metadata (artist / song title)
 - Animated now-playing display with flowing color effects
 - Dark purple-themed UI
-- System tray integration (minimize on close)
 - Desktop notifications on song change
 - Persistent state (favorites, last station) across sessions
 - Cross-platform: Linux and Windows
@@ -38,6 +37,17 @@ cargo build --release
 ```sh
 cross build --release --target x86_64-pc-windows-gnu
 ```
+
+## Releasing
+
+The project uses GitHub Actions to build and publish releases automatically. To create a new release:
+
+```sh
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+This triggers the CI workflow which builds binaries for Linux and Windows, then creates a GitHub release with the artifacts attached.
 
 ## Tech Stack
 
