@@ -1264,7 +1264,7 @@ fn main() -> Result<()> {
         .with_inner_size([440.0, 660.0])
         .with_title("eRadio")
         .with_decorations(false)
-        .with_always_on_top();
+;
 
     if let Some(icon) = load_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
