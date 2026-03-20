@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libgtk-3-dev libfuse2
+          sudo apt-get install -y libasound2-dev libgtk-3-dev libfuse2 imagemagick
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,12 +45,13 @@ jobs:
           mkdir -p AppDir/usr/share/applications
 
           cp target/release/eradio AppDir/usr/bin/
-          cp eradio.png AppDir/usr/share/icons/hicolor/256x256/apps/eradio.png
+          convert eradio.png -resize 256x256! eradio-256.png
+          cp eradio-256.png AppDir/usr/share/icons/hicolor/256x256/apps/eradio.png
           cp eradio.desktop AppDir/usr/share/applications/eradio.desktop
 
           # Build AppImage
           export VERSION="${GITHUB_REF_NAME#v}"
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --icon-file eradio.png --desktop-file eradio.desktop --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --icon-file eradio-256.png --desktop-file eradio.desktop --output appimage
 
           mv eRadio-*.AppImage eradio-linux-x86_64.AppImage
 

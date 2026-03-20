@@ -1094,7 +1094,7 @@ impl eframe::App for RadioApp {
                                 .color(TEXT),
                         );
                         ui.label(
-                            RichText::new("v0.1.6").size(12.0).color(MUTED),
+                            RichText::new("v0.1.7").size(12.0).color(MUTED),
                         );
                         ui.add_space(12.0);
                         ui.label(
