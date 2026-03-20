@@ -28,7 +28,7 @@ const BORDER_PLAYING: Color32 = Color32::from_rgb(80, 40, 140);
 
 fn setup_custom_style(ctx: &egui::Context) {
     let mut vis = egui::Visuals::dark();
-    vis.panel_fill = BG;
+    vis.panel_fill = Color32::TRANSPARENT;
     vis.window_fill = BG;
     vis.faint_bg_color = BG_PANEL;
     vis.extreme_bg_color = Color32::from_rgb(6, 6, 12);
@@ -107,6 +107,7 @@ struct RadioApp {
 
     // Window state
     show_about: bool,
+    title_icon: Option<egui::TextureHandle>,
 
     // Startup / notification state
     startup_done: bool,
@@ -162,6 +163,7 @@ impl RadioApp {
             search_results_tx: search_tx,
             is_searching: false,
             show_about: false,
+            title_icon: None,
             startup_done: false,
             last_notified_metadata: None,
         }
@@ -402,9 +404,74 @@ impl eframe::App for RadioApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_actions();
 
+        // Load title bar icon texture once
+        if self.title_icon.is_none() {
+            if let Some((mut rgba, w, h)) = decode_png_rgba() {
+                // Replace white background with title bar color
+                replace_bg(&mut rgba, w, h, [14, 14, 26, 255]);
+                let pixels: Vec<egui::Color32> = rgba
+                    .chunks(4)
+                    .map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                    .collect();
+                let image = egui::ColorImage {
+                    size: [w as usize, h as usize],
+                    pixels,
+                };
+                self.title_icon = Some(ctx.load_texture(
+                    "app_icon",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+
+        // Resize edges (needed since decorations are off)
+        {
+            let resize_margin = 8.0;
+            let sr = ctx.screen_rect();
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                let on_left = pos.x <= sr.left() + resize_margin;
+                let on_right = pos.x >= sr.right() - resize_margin;
+                let on_top = pos.y <= sr.top() + resize_margin;
+                let on_bottom = pos.y >= sr.bottom() - resize_margin;
+
+                use egui::viewport::ResizeDirection::*;
+                let direction = match (on_left, on_right, on_top, on_bottom) {
+                    (true, _, true, _) => Some(NorthWest),
+                    (_, true, true, _) => Some(NorthEast),
+                    (true, _, _, true) => Some(SouthWest),
+                    (_, true, _, true) => Some(SouthEast),
+                    (true, _, _, _) => Some(West),
+                    (_, true, _, _) => Some(East),
+                    (_, _, true, _) => Some(North),
+                    (_, _, _, true) => Some(South),
+                    _ => None,
+                };
+
+                if let Some(dir) = direction {
+                    // Show resize cursor
+                    let cursor = match dir {
+                        North | South => egui::CursorIcon::ResizeVertical,
+                        East | West => egui::CursorIcon::ResizeHorizontal,
+                        NorthWest | SouthEast => egui::CursorIcon::ResizeNwSe,
+                        NorthEast | SouthWest => egui::CursorIcon::ResizeNeSw,
+                    };
+                    ctx.set_cursor_icon(cursor);
+
+                    if ctx.input(|i| i.pointer.any_pressed()) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+                    }
+                }
+            }
+        }
+
         // Restore last station on first frame
         if !self.startup_done {
             self.startup_done = true;
+
+            #[cfg(target_os = "windows")]
+            enable_rounded_corners();
+
             if let Some(saved) = Self::load_state() {
                 self.search_query = saved.search_query;
                 if let Some(station) = saved.station {
@@ -450,13 +517,187 @@ impl eframe::App for RadioApp {
         let station_count = self.stations.len();
         let time = ctx.input(|i| i.time);
 
+        // Paint rounded window background behind everything
+        let corner_radius = 10.0;
+        let screen_rect = ctx.screen_rect();
+        let bg_painter = ctx.layer_painter(egui::LayerId::background());
+        bg_painter.rect_filled(screen_rect, corner_radius, BG);
+        bg_painter.rect_stroke(screen_rect, corner_radius, egui::Stroke::new(1.0, BORDER));
+
+        // ── Custom title bar (painted over the full window width) ────
+        let title_height = 33.0;
+        {
+            let title_rect = egui::Rect::from_min_size(
+                screen_rect.min,
+                egui::vec2(screen_rect.width(), title_height),
+            );
+
+            // Title bar background with rounded top corners
+            let bg_painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("titlebar"),
+            ));
+            bg_painter.rect_filled(
+                title_rect,
+                egui::Rounding {
+                    nw: corner_radius,
+                    ne: corner_radius,
+                    sw: 0.0,
+                    se: 0.0,
+                },
+                Color32::from_rgb(14, 14, 26),
+            );
+
+            // Separator line at bottom of title bar
+            bg_painter.line_segment(
+                [
+                    egui::pos2(title_rect.left(), title_rect.bottom()),
+                    egui::pos2(title_rect.right(), title_rect.bottom()),
+                ],
+                egui::Stroke::new(1.0, BORDER),
+            );
+
+            // App icon + title (left side)
+            let mut text_x = title_rect.left() + 10.0;
+            if let Some(ref icon) = self.title_icon {
+                let icon_size = 21.0;
+                let icon_rect = egui::Rect::from_min_size(
+                    egui::pos2(text_x, title_rect.center().y - icon_size / 2.0),
+                    egui::vec2(icon_size, icon_size),
+                );
+                bg_painter.image(
+                    icon.id(),
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                text_x += icon_size + 6.0;
+            }
+            bg_painter.text(
+                egui::pos2(text_x, title_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "eRadio",
+                egui::FontId::proportional(16.0),
+                Color32::from_rgb(255, 220, 0),
+            );
+
+            // Window control buttons flush to the right edge
+            let btn_w = 27.0;
+            let btn_h = 24.0;
+            let btn_spacing = 3.0;
+            let btn_y = title_rect.center().y;
+            let mut btn_x = title_rect.right() - 2.0;
+
+            // Close button (rightmost)
+            btn_x -= btn_w;
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(btn_x + btn_w / 2.0, btn_y),
+                egui::vec2(btn_w, btn_h),
+            );
+
+            // Minimize button
+            btn_x -= btn_w + btn_spacing;
+            let min_rect = egui::Rect::from_center_size(
+                egui::pos2(btn_x + btn_w / 2.0, btn_y),
+                egui::vec2(btn_w, btn_h),
+            );
+
+            // Drag area covers title bar excluding buttons
+            let drag_rect = egui::Rect::from_min_max(
+                title_rect.min,
+                egui::pos2(min_rect.left() - 4.0, title_rect.max.y),
+            );
+            let drag_resp = ctx.input(|i| {
+                i.pointer
+                    .hover_pos()
+                    .map(|p| drag_rect.contains(p))
+                    .unwrap_or(false)
+            });
+            if drag_resp && ctx.input(|i| i.pointer.any_pressed()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+
+            // Interact with buttons via an Area overlay
+            egui::Area::new(egui::Id::new("titlebar_buttons"))
+                .fixed_pos(egui::pos2(min_rect.left(), title_rect.top()))
+                .order(egui::Order::Foreground)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    let total_w = title_rect.right() - min_rect.left();
+                    ui.allocate_ui(egui::vec2(total_w, title_height), |ui| {
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(2.0);
+
+                                // Close button
+                                let close_resp = ui.allocate_rect(
+                                    close_rect,
+                                    egui::Sense::click(),
+                                );
+                                if close_resp.hovered() {
+                                    bg_painter.rect_filled(
+                                        close_rect,
+                                        4.0,
+                                        Color32::from_rgb(180, 40, 40),
+                                    );
+                                }
+                                bg_painter.text(
+                                    close_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "x",
+                                    egui::FontId::proportional(16.0),
+                                    if close_resp.hovered() {
+                                        Color32::WHITE
+                                    } else {
+                                        MUTED
+                                    },
+                                );
+                                if close_resp.clicked() {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+
+                                // Minimize button
+                                let min_resp = ui.allocate_rect(
+                                    min_rect,
+                                    egui::Sense::click(),
+                                );
+                                if min_resp.hovered() {
+                                    bg_painter.rect_filled(
+                                        min_rect,
+                                        4.0,
+                                        Color32::from_rgb(50, 50, 70),
+                                    );
+                                }
+                                bg_painter.text(
+                                    min_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "—",
+                                    egui::FontId::proportional(16.0),
+                                    if min_resp.hovered() { TEXT } else { MUTED },
+                                );
+                                if min_resp.clicked() {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                }
+                            },
+                        );
+                    });
+                });
+        }
+
         let panel_frame = egui::Frame::none()
-            .fill(BG)
-            .inner_margin(egui::Margin::same(12.0));
+            .fill(Color32::TRANSPARENT)
+            .inner_margin(egui::Margin {
+                left: 12.0,
+                right: 12.0,
+                top: title_height + 4.0,
+                bottom: 12.0,
+            });
 
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
+
                 // ── Player card (always visible) ────────────────────────
                 let has_station = current_name.is_some();
                 egui::Frame::none()
@@ -853,7 +1094,7 @@ impl eframe::App for RadioApp {
                                 .color(TEXT),
                         );
                         ui.label(
-                            RichText::new("v0.1.4").size(12.0).color(MUTED),
+                            RichText::new("v0.1.5").size(12.0).color(MUTED),
                         );
                         ui.add_space(12.0);
                         ui.label(
@@ -914,7 +1155,44 @@ impl eframe::App for RadioApp {
     }
 }
 
-fn load_icon() -> Option<egui::IconData> {
+/// On Windows 11, tell DWM to round the window corners.
+#[cfg(target_os = "windows")]
+fn enable_rounded_corners() {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> *mut c_void;
+    }
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            attr: u32,
+            value: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+
+    let title: Vec<u16> = "eRadio\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &DWMWCP_ROUND as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+/// Decode eradio.png into RGBA pixels, with width and height.
+fn decode_png_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let png_bytes = include_bytes!("../eradio.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()));
     let mut reader = decoder.read_info().ok()?;
@@ -925,27 +1203,67 @@ fn load_icon() -> Option<egui::IconData> {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => {
-            let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+            let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
             for chunk in buf.chunks(3) {
-                rgba.extend_from_slice(chunk);
-                rgba.push(255);
+                out.extend_from_slice(chunk);
+                out.push(255);
             }
-            rgba
+            out
         }
         _ => return None,
     };
+    Some((rgba, info.width, info.height))
+}
 
-    Some(egui::IconData {
-        rgba,
-        width: info.width,
-        height: info.height,
-    })
+/// Flood-fill white background pixels starting from all edges,
+/// replacing them with `fill` RGBA value.
+fn replace_bg(rgba: &mut [u8], w: u32, h: u32, fill: [u8; 4]) {
+    let (w, h) = (w as usize, h as usize);
+    let mut visited = vec![false; w * h];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    // Seed from all edge pixels
+    for x in 0..w {
+        stack.push((x, 0));
+        stack.push((x, h - 1));
+    }
+    for y in 0..h {
+        stack.push((0, y));
+        stack.push((w - 1, y));
+    }
+
+    while let Some((x, y)) = stack.pop() {
+        let idx = y * w + x;
+        if visited[idx] {
+            continue;
+        }
+        let off = idx * 4;
+        // Consider a pixel "white/light background" if R,G,B are all > 240
+        if rgba[off] <= 240 || rgba[off + 1] <= 240 || rgba[off + 2] <= 240 {
+            continue;
+        }
+        visited[idx] = true;
+        rgba[off..off + 4].copy_from_slice(&fill);
+
+        if x > 0 { stack.push((x - 1, y)); }
+        if x + 1 < w { stack.push((x + 1, y)); }
+        if y > 0 { stack.push((x, y - 1)); }
+        if y + 1 < h { stack.push((x, y + 1)); }
+    }
+}
+
+fn load_icon() -> Option<egui::IconData> {
+    let (mut rgba, width, height) = decode_png_rgba()?;
+    // Replace white background with transparent for the taskbar icon
+    replace_bg(&mut rgba, width, height, [0, 0, 0, 0]);
+    Some(egui::IconData { rgba, width, height })
 }
 
 fn main() -> Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([440.0, 660.0])
         .with_title("eRadio")
+        .with_decorations(false)
         .with_always_on_top();
 
     if let Some(icon) = load_icon() {

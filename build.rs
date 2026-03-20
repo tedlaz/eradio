@@ -122,8 +122,47 @@ fn resize_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Ve
     dst
 }
 
+fn flood_fill_bg_transparent(rgba: &mut [u8], w: u32, h: u32) {
+    let (w, h) = (w as usize, h as usize);
+    let mut visited = vec![false; w * h];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    // Seed from all edge pixels
+    for x in 0..w {
+        stack.push((x, 0));
+        stack.push((x, h - 1));
+    }
+    for y in 0..h {
+        stack.push((0, y));
+        stack.push((w - 1, y));
+    }
+
+    while let Some((x, y)) = stack.pop() {
+        let idx = y * w + x;
+        if visited[idx] {
+            continue;
+        }
+        let off = idx * 4;
+        if rgba[off] <= 240 || rgba[off + 1] <= 240 || rgba[off + 2] <= 240 {
+            continue;
+        }
+        visited[idx] = true;
+        rgba[off] = 0;
+        rgba[off + 1] = 0;
+        rgba[off + 2] = 0;
+        rgba[off + 3] = 0;
+
+        if x > 0 { stack.push((x - 1, y)); }
+        if x + 1 < w { stack.push((x + 1, y)); }
+        if y > 0 { stack.push((x, y - 1)); }
+        if y + 1 < h { stack.push((x, y + 1)); }
+    }
+}
+
 fn generate_ico_from_png(png_bytes: &[u8], ico_path: &str) {
-    let (w, h, rgba) = decode_png(png_bytes);
+    let (w, h, mut rgba) = decode_png(png_bytes);
+    flood_fill_bg_transparent(&mut rgba, w, h);
+    let rgba = rgba;
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
 
     for size in [16u32, 32, 48, 64, 256] {
