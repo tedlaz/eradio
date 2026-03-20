@@ -42,7 +42,7 @@ cross build --release --target x86_64-pc-windows-gnu
 
 The project uses GitHub Actions to build and publish releases automatically. To create a new release:
 
-- open build.rs and in line 856 change the version (eg v0.1.2)
+- open main.rs and in line 1097 change the version (eg v0.1.2)
 - Open Cargo.toml and set version (eg v0.1.2)
 
 ```sh
