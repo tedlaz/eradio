@@ -83,16 +83,39 @@ fn resize_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Ve
             let fx = sx - x0 as f32;
             let fy = sy - y0 as f32;
 
-            for c in 0..4 {
-                let p00 = src[((y0 * src_w + x0) * 4 + c) as usize] as f32;
-                let p10 = src[((y0 * src_w + x1) * 4 + c) as usize] as f32;
-                let p01 = src[((y1 * src_w + x0) * 4 + c) as usize] as f32;
-                let p11 = src[((y1 * src_w + x1) * 4 + c) as usize] as f32;
-                let val = p00 * (1.0 - fx) * (1.0 - fy)
-                    + p10 * fx * (1.0 - fy)
-                    + p01 * (1.0 - fx) * fy
-                    + p11 * fx * fy;
-                dst[((dy * dst_w + dx) * 4 + c) as usize] = val.round() as u8;
+            // Read the four neighboring pixels
+            let i00 = ((y0 * src_w + x0) * 4) as usize;
+            let i10 = ((y0 * src_w + x1) * 4) as usize;
+            let i01 = ((y1 * src_w + x0) * 4) as usize;
+            let i11 = ((y1 * src_w + x1) * 4) as usize;
+
+            // Get alpha values
+            let a00 = src[i00 + 3] as f32;
+            let a10 = src[i10 + 3] as f32;
+            let a01 = src[i01 + 3] as f32;
+            let a11 = src[i11 + 3] as f32;
+
+            // Interpolate alpha
+            let a = a00 * (1.0 - fx) * (1.0 - fy)
+                + a10 * fx * (1.0 - fy)
+                + a01 * (1.0 - fx) * fy
+                + a11 * fx * fy;
+            let di = ((dy * dst_w + dx) * 4) as usize;
+            dst[di + 3] = a.round() as u8;
+
+            // Interpolate RGB in premultiplied alpha space to avoid dark fringes
+            if a > 0.0 {
+                for c in 0..3 {
+                    let p00 = src[i00 + c] as f32 * a00;
+                    let p10 = src[i10 + c] as f32 * a10;
+                    let p01 = src[i01 + c] as f32 * a01;
+                    let p11 = src[i11 + c] as f32 * a11;
+                    let val = p00 * (1.0 - fx) * (1.0 - fy)
+                        + p10 * fx * (1.0 - fy)
+                        + p01 * (1.0 - fx) * fy
+                        + p11 * fx * fy;
+                    dst[di + c] = (val / a).clamp(0.0, 255.0).round() as u8;
+                }
             }
         }
     }
