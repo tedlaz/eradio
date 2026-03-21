@@ -97,7 +97,6 @@ impl MetadataExtractor {
         }
 
         let mut buffer: Vec<u8> = Vec::new();
-        let mut bytes_read: usize = 0;
         let mut stream = response;
 
         loop {
@@ -112,28 +111,35 @@ impl MetadataExtractor {
                 Ok(0) => break,
                 Ok(n) => {
                     buffer.extend_from_slice(&chunk[..n]);
-                    bytes_read += n;
                 }
                 Err(_) => break,
             }
 
             // Process metadata at intervals
-            while bytes_read >= meta_interval + 1 && buffer.len() >= meta_interval + 1 {
-                // Skip audio data
-                let audio_data = buffer.split_off(meta_interval);
-                buffer = audio_data;
-                bytes_read -= meta_interval;
-
-                if buffer.is_empty() {
+            loop {
+                // Need at least meta_interval audio bytes + 1 metadata length byte
+                if buffer.len() < meta_interval + 1 {
                     break;
                 }
 
-                // Read metadata length
-                let meta_len_byte = buffer[0] as usize;
+                // Peek at metadata length before consuming anything
+                let meta_len_byte = buffer[meta_interval] as usize;
                 let meta_len = meta_len_byte * 16;
+                let frame_size = meta_interval + 1 + meta_len;
+
+                // Wait until we have the complete frame
+                if buffer.len() < frame_size {
+                    break;
+                }
+
+                // Now safe to consume: skip audio data
+                buffer.drain(0..meta_interval);
+
+                // Skip metadata length byte
                 buffer.drain(0..1);
 
-                if meta_len > 0 && buffer.len() >= meta_len {
+                // Extract and parse metadata
+                if meta_len > 0 {
                     let meta_data: Vec<u8> = buffer.drain(0..meta_len).collect();
                     if let Ok(text) = String::from_utf8(meta_data) {
                         let parsed = Self::parse_metadata(&text);
@@ -143,12 +149,6 @@ impl MetadataExtractor {
                         }
                     }
                 }
-            }
-
-            // Prevent buffer from growing too large
-            if buffer.len() > meta_interval * 2 {
-                buffer.clear();
-                bytes_read = 0;
             }
         }
 
