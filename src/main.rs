@@ -335,19 +335,25 @@ impl RadioApp {
                         buffer.extend_from_slice(&chunk[..n]);
 
                         while buffer.len() >= meta_interval + 1 {
-                            buffer.drain(0..meta_interval);
+                            // Peek at metadata length before consuming anything
+                            let meta_len = buffer[meta_interval] as usize * 16;
+                            let frame_size = meta_interval + 1 + meta_len;
 
-                            let meta_len = buffer[0] as usize * 16;
-                            let total_meta = 1 + meta_len;
-
-                            if buffer.len() < total_meta {
+                            // Wait until we have the complete frame
+                            if buffer.len() < frame_size {
                                 break;
                             }
 
+                            // Now safe to consume: skip audio data
+                            buffer.drain(0..meta_interval);
+
+                            // Skip metadata length byte
+                            buffer.drain(0..1);
+
+                            // Extract and parse metadata
                             if meta_len > 0 {
-                                if let Ok(text) =
-                                    String::from_utf8(buffer[1..1 + meta_len].to_vec())
-                                {
+                                let meta_data: Vec<u8> = buffer.drain(0..meta_len).collect();
+                                if let Ok(text) = String::from_utf8(meta_data) {
                                     if let Some(caps) = re.captures(&text) {
                                         if let Some(m) = caps.get(1) {
                                             if meta_gen.load(Ordering::SeqCst) == gen {
@@ -358,8 +364,6 @@ impl RadioApp {
                                     }
                                 }
                             }
-
-                            buffer.drain(0..total_meta);
                         }
                     }
                     Err(_) => break,
@@ -1094,7 +1098,7 @@ impl eframe::App for RadioApp {
                                 .color(TEXT),
                         );
                         ui.label(
-                            RichText::new("v0.1.8").size(12.0).color(MUTED),
+                            RichText::new("v0.1.9").size(12.0).color(MUTED),
                         );
                         ui.add_space(12.0);
                         ui.label(
