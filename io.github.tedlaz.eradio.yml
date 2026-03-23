@@ -1,0 +1,31 @@
+app-id: io.github.tedlaz.eradio
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: eradio
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+
+modules:
+  - name: eradio
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 eradio /app/bin/eradio
+      - install -Dm644 io.github.tedlaz.eradio.desktop /app/share/applications/io.github.tedlaz.eradio.desktop
+      - install -Dm644 eradio.png /app/share/icons/hicolor/256x256/apps/io.github.tedlaz.eradio.png
+      - install -Dm644 io.github.tedlaz.eradio.metainfo.xml /app/share/metainfo/io.github.tedlaz.eradio.metainfo.xml
+    sources:
+      - type: file
+        path: eradio
+      - type: file
+        path: io.github.tedlaz.eradio.desktop
+      - type: file
+        path: eradio.png
+      - type: file
+        path: io.github.tedlaz.eradio.metainfo.xml

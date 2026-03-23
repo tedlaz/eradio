@@ -100,8 +100,52 @@ jobs:
           name: eradio-windows-x86_64
           path: eradio-windows-x86_64.zip
 
+  build-flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libgtk-3-dev flatpak flatpak-builder
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: flatpak-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build binary
+        run: cargo build --release
+
+      - name: Set up Flatpak
+        run: |
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Build Flatpak
+        run: |
+          cp target/release/eradio eradio
+          flatpak-builder --force-clean build-dir io.github.tedlaz.eradio.yml \
+            --state-dir=.flatpak-builder \
+            --install-deps-from=flathub
+          flatpak build-export repo build-dir
+          flatpak build-bundle repo eradio.flatpak io.github.tedlaz.eradio
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eradio-flatpak
+          path: eradio.flatpak
+
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,3 +162,4 @@ jobs:
           files: |
             artifacts/eradio-linux-x86_64/eradio-linux-x86_64.AppImage
             artifacts/eradio-windows-x86_64/eradio-windows-x86_64.zip
+            artifacts/eradio-flatpak/eradio.flatpak

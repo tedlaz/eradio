@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tedlaz.eradio</id>
+  <name>eRadio</name>
+  <summary>Internet Radio Browser and Player</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      eRadio is a lightweight internet radio browser and player.
+      Browse and listen to radio stations from around the world.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.tedlaz.eradio.desktop</launchable>
+  <url type="homepage">https://github.com/tedlaz/eradio</url>
+  <url type="bugtracker">https://github.com/tedlaz/eradio/issues</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.9" date="2025-01-01">
+      <description>
+        <p>Latest release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
