@@ -108,7 +108,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libgtk-3-dev flatpak flatpak-builder
+          sudo apt-get install -y libasound2-dev libgtk-3-dev flatpak flatpak-builder imagemagick
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -132,6 +132,7 @@ jobs:
       - name: Build Flatpak
         run: |
           cp target/release/eradio eradio
+          convert eradio.png -resize 256x256! eradio.png
           flatpak-builder --force-clean build-dir io.github.tedlaz.eradio.yml \
             --state-dir=.flatpak-builder \
             --install-deps-from=flathub
